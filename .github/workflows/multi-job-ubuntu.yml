@@ -1,0 +1,225 @@
+name: Web Tours Multi-Job (Ubuntu)
+
+# ---------------------------------------------------------------------------
+# Every job runs on a GitHub-hosted Ubuntu runner (ubuntu-latest).
+#
+#   lint ──┐
+#          ├──> browser-check (matrix: 3 browsers) ──> ui-tests (matrix) ──> summary
+#   collect┘    (matrix: 3 Python versions)
+#
+#   1. lint           - flake8 (PEP 8).
+#   2. collect        - pytest --collect-only on Python 3.11 / 3.12 / 3.13.
+#   3. browser-check  - installs each Playwright browser + Linux deps and
+#                       launches it headless (no app access needed).
+#   4. ui-tests       - real UI tests, browser x marker matrix. Ubuntu cloud
+#                       runners cannot reach the private default host
+#                       (192.168.1.183), so this job only runs when a
+#                       publicly reachable URL is supplied: the base_url
+#                       input on a manual run, or the repository variable
+#                       PUBLIC_BASE_URL.
+#   5. summary        - always runs; writes a results table to the run page
+#                       and fails the workflow if any required job failed.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, "mislam-dev*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Publicly reachable Web Tours URL (blank = vars.PUBLIC_BASE_URL; UI tests skipped if both empty)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint (flake8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run flake8
+        run: flake8 .
+
+  collect:
+    name: Collect tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Collect tests (imports, fixtures, markers)
+        run: python -m pytest --collect-only -q
+
+  browser-check:
+    name: Browser check (${{ matrix.browser }})
+    needs: [lint, collect]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright browser and Linux dependencies
+        run: python -m playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Launch browser headless
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: |
+          python - <<'EOF'
+          import os
+          from playwright.sync_api import sync_playwright
+
+          name = os.environ["BROWSER"]
+          with sync_playwright() as p:
+              browser = getattr(p, name).launch(headless=True)
+              page = browser.new_page()
+              page.set_content("<title>ok</title>")
+              assert page.title() == "ok"
+              print(f"{name} {browser.version} launched OK")
+              browser.close()
+          EOF
+
+  ui-tests:
+    name: UI tests (${{ matrix.browser }}, ${{ matrix.marker }})
+    needs: browser-check
+    if: github.event_name != 'pull_request' && (inputs.base_url != '' || vars.PUBLIC_BASE_URL != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # Tests share one Web Tours account, so run one combination at a time.
+      max-parallel: 1
+      matrix:
+        browser: [chromium, firefox]
+        marker: [smoke, regression]
+    env:
+      BASE_URL: ${{ inputs.base_url || vars.PUBLIC_BASE_URL }}
+      BROWSER: ${{ matrix.browser }}
+      HEADLESS: "true"
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright browser and Linux dependencies
+        run: python -m playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Check Web Tours is reachable
+        run: python -c "import os, urllib.request; print('HTTP', urllib.request.urlopen(os.environ['BASE_URL'], timeout=15).status, os.environ['BASE_URL'])"
+
+      - name: Run UI tests
+        run: >
+          python -m pytest
+          -m "${{ matrix.marker }}"
+          --browser-name "$BROWSER"
+          --base-url "$BASE_URL"
+          --junitxml=reports/junit.xml
+          -v
+
+      - name: Upload report and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-report-${{ github.run_number }}-${{ matrix.browser }}-${{ matrix.marker }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+  summary:
+    name: Summary
+    needs: [lint, collect, browser-check, ui-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write job results
+        env:
+          LINT: ${{ needs.lint.result }}
+          COLLECT: ${{ needs.collect.result }}
+          BROWSER_CHECK: ${{ needs.browser-check.result }}
+          UI_TESTS: ${{ needs.ui-tests.result }}
+        run: |
+          {
+            echo "## Web Tours multi-job results"
+            echo ""
+            echo "| Job | Result |"
+            echo "|-----|--------|"
+            echo "| Lint | $LINT |"
+            echo "| Collect | $COLLECT |"
+            echo "| Browser check | $BROWSER_CHECK |"
+            echo "| UI tests | $UI_TESTS |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ui-tests may legitimately be 'skipped' (no public URL / PRs).
+          for r in "$LINT" "$COLLECT" "$BROWSER_CHECK"; do
+            [ "$r" = "success" ] || { echo "Required job result: $r"; exit 1; }
+          done
+          case "$UI_TESTS" in success|skipped) ;; *) echo "UI tests: $UI_TESTS"; exit 1 ;; esac

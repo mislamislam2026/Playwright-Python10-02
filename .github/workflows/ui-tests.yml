@@ -1,0 +1,133 @@
+name: Web Tours UI Tests
+
+# ---------------------------------------------------------------------------
+# Two jobs:
+#   1. quality   - GitHub-hosted runner: lint + make sure every test collects.
+#                  Runs on every push / PR. Needs no access to the app.
+#   2. ui-tests  - Self-hosted runner on the network that can reach Web Tours
+#                  (http://192.168.1.183:1080 is a private address, so
+#                  GitHub's cloud runners cannot reach it).
+#                  Runs when the repository variable RUN_UI_TESTS is 'true'.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 11 * * 1-5"      # weekdays 11:00 UTC (07:00 New York, EDT)
+  workflow_dispatch:
+    inputs:
+      marker:
+        description: "Pytest marker expression"
+        type: choice
+        default: smoke
+        options:
+          - smoke
+          - regression
+          - login
+          - negative
+          - smoke or regression
+      browser:
+        description: "Browser engine"
+        type: choice
+        default: chromium
+        options: [chromium, firefox, webkit]
+      base_url:
+        description: "Web Tours URL (blank = repository variable / default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  quality:
+    name: Lint & collect tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (flake8, PEP 8)
+        run: flake8 .
+
+      - name: Collect tests (imports, fixtures, markers)
+        run: pytest --collect-only -q
+
+  ui-tests:
+    name: UI tests (${{ inputs.marker || 'smoke or regression' }}, ${{ inputs.browser || 'chromium' }})
+    needs: quality
+    if: vars.RUN_UI_TESTS == 'true' && github.event_name != 'pull_request'
+    runs-on: [self-hosted, webtours]
+    timeout-minutes: 45
+    # Tests share one Web Tours account, so never run two suites at once.
+    concurrency:
+      group: webtours-ui
+      cancel-in-progress: false
+
+    env:
+      BASE_URL: ${{ inputs.base_url || vars.BASE_URL || 'http://192.168.1.183:1080/webtours/' }}
+      BROWSER: ${{ inputs.browser || 'chromium' }}
+      # Manual runs use the chosen marker; push and schedule run everything.
+      MARKER: ${{ inputs.marker || 'smoke or regression' }}
+      HEADLESS: "true"
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: python -m playwright install ${{ env.BROWSER }}
+
+      - name: Check Web Tours is reachable
+        run: python -c "import os, urllib.request; print('HTTP', urllib.request.urlopen(os.environ['BASE_URL'], timeout=15).status, os.environ['BASE_URL'])"
+
+      - name: Run UI tests
+        run: >
+          python -m pytest
+          -m "${{ env.MARKER }}"
+          --browser-name ${{ env.BROWSER }}
+          --base-url ${{ env.BASE_URL }}
+          --junitxml=reports/junit.xml
+          -v
+
+      - name: Upload report and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-report-${{ github.run_number }}-${{ env.BROWSER }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: warn

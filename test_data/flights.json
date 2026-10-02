@@ -1,0 +1,16 @@
+{
+  "routes": [
+    {"depart": "Denver", "arrive": "London"},
+    {"depart": "Paris", "arrive": "Seattle"},
+    {"depart": "Frankfurt", "arrive": "Sydney"}
+  ],
+  "payment": {
+    "first_name": "Jojo",
+    "last_name": "Bean",
+    "street": "1 Test Street",
+    "city": "Denver, CO 80202",
+    "passenger_name": "Jojo Bean",
+    "credit_card": "4111111111111111",
+    "expiry": "12/30"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "valid": {
+    "username": "jojo",
+    "password": "bean"
+  },
+  "invalid_password": {
+    "username": "jojo",
+    "password": "wrong_password"
+  },
+  "unknown_user": {
+    "username": "no_such_user_123",
+    "password": "bean"
+  },
+  "empty": {
+    "username": "",
+    "password": ""
+  }
+}

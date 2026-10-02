@@ -54,7 +54,7 @@ Web-Tours-RT/
 Python 3.9+ is required.
 
 ```bash
-git clone https://github.com/mislamislam2026/Web-Tours-RT.git
+git clone https://github.com/mislamislam2026/Web-Tours-RT.gitcd ..
 cd Web-Tours-RT
 
 # create and activate a virtual environment
